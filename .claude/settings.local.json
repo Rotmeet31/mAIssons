@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"/Users/glebchirov/PARA/AREAS/Coding Projects/medialens\" && .venv/bin/pip install --quiet feedparser trafilatura \"sentence-transformers==3.3.1\" google-generativeai streamlit \"loguru==0.7.3\" APScheduler \"pytest==8.3.4\" pytest-mock 2>&1 | tail -20)"
+    ]
+  }
+}
