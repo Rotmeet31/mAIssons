@@ -8,8 +8,9 @@ import re
 
 from openai import OpenAI
 from loguru import logger
+from pydantic import ValidationError
 
-from config import LLM_MODEL, LLM_TEMPERATURE, MAX_RETRIES, OPENROUTER_BASE_URL
+from config import ANALYSIS_BODY_CHARS, LLM_MODEL, LLM_TEMPERATURE, MAX_RETRIES, OPENROUTER_BASE_URL
 from database import (
     get_articles_by_cluster,
     get_cluster_analysis,
@@ -17,6 +18,7 @@ from database import (
     get_unanalyzed_ready_clusters,
     insert_cluster_analysis,
 )
+from schemas import ClusterAnalysisResult
 
 
 # ── Client ─────────────────────────────────────────────────────────────────
@@ -30,25 +32,56 @@ def _get_client() -> OpenAI:
 
 # ── Prompt ─────────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = (
-    "You are a cross-spectrum news analyst. You will be given articles about the same story "
-    "from outlets across the political spectrum (LEFT / CENTER / RIGHT). "
-    "Identify: what they agree on, how they frame it differently, and what each side omits.\n"
-    "Return ONLY valid JSON with exactly these fields:\n"
-    "  consensus      — JSON array of 2-4 strings; each string is one point most sources "
-    "agree on, with at least one inline outlet citation like (Reuters, BBC)\n"
-    "  disagreements  — JSON array of 2-4 strings; each string describes a framing or "
-    "emphasis difference between leans, with inline outlet citations\n"
-    "  gaps           — single string: notable omissions, misleading claims, or facts "
-    "ignored by one side; or exactly \"None identified.\" if none found"
-)
+_SYSTEM_PROMPT = """\
+You are a cross-spectrum news analyst. You will be given articles about the same story
+from outlets tagged [LEFT], [CENTER], or [RIGHT].
+
+Your task: produce a differential analysis — not just what each side says, but what each
+side says that the other side does NOT say, or barely says.
+
+Return ONLY valid JSON with exactly these fields:
+
+summary
+  String. 2-3 sentences describing what happened. Neutral, fact-based.
+  Anchored in what ALL sources report. No editorial framing.
+
+shared_ground
+  JSON array of 2-4 strings. Facts that most leans report consistently.
+  Each string must include inline outlet citations, e.g. "(Reuters, Fox News, Guardian)".
+
+left_not_right
+  JSON array of 0-3 objects. Each object: {"claim": "...", "coverage": "omitted"|"downplayed"}
+  "claim" = something LEFT articles emphasize that RIGHT articles either:
+    - "omitted":    have zero mention of this topic, angle, or figure.
+    - "downplayed": mention it but not prominently — buried after paragraph 3,
+                    one passing sentence, absent from headline and lede.
+  Be specific: name the angle and cite the source lean.
+  Example: {"claim": "Guardian and NPR lead with civilian casualty figures ($X);
+             Fox and Breitbart do not mention this number.", "coverage": "omitted"}
+  Use [] if no significant asymmetry is found.
+
+right_not_left
+  JSON array of 0-3 objects. Same structure.
+  "claim" = something RIGHT articles emphasize that LEFT articles omit or downplay.
+
+center_angle
+  String. What CENTER sources (AP, BBC, Reuters, Al Jazeera) uniquely add or frame
+  differently from both left and right — context, data, international reaction, etc.
+  Write "" (empty string) if center simply repeats what left and right both cover.
+
+Rules:
+- "omitted" requires that you checked all articles on the other side and found ZERO mention.
+- Do not invent coverage. Only use what the article snippets actually contain.
+- Be specific in claims. Name angles, figures, and outlets — not vague patterns.
+- If only left or only right articles are present, set the missing-side field to [].
+"""
 
 
 def _build_prompt(headline: str, articles: list) -> str:
     lines = [f'Story cluster: "{headline}"\n\nARTICLES:']
     for art in articles:
         lean_tag = art["source_lean"].upper()
-        snippet = (art["body"] or "")[:300].strip()
+        snippet = (art["body"] or "")[:ANALYSIS_BODY_CHARS].strip()
         lines.append(f'\n[{lean_tag}] {art["source_name"]}: "{art["title"]}"\n{snippet}')
     return "\n".join(lines)
 
@@ -59,24 +92,18 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
-def _parse(raw: str) -> dict:
+def _parse_and_validate(raw: str) -> ClusterAnalysisResult:
+    """Strip thinking tags and fences, then validate against ClusterAnalysisResult."""
     cleaned = _THINK_RE.sub("", raw).strip()
-    match = _FENCE_RE.search(cleaned)
-    data = json.loads(match.group(1) if match else cleaned)
+    fence_match = _FENCE_RE.search(cleaned)
+    json_str = fence_match.group(1) if fence_match else cleaned
+    data = json.loads(json_str)
 
-    consensus = data.get("consensus", [])
-    if isinstance(consensus, str):
-        consensus = [consensus]
+    # Remap flat lean keys if the model returns them at the top level instead of nested
+    if "lean_summaries" not in data and any(k in data for k in ("left", "center", "right")):
+        data["lean_summaries"] = {k: data.pop(k, "") for k in ("left", "center", "right")}
 
-    disagreements = data.get("disagreements", [])
-    if isinstance(disagreements, str):
-        disagreements = [disagreements]
-
-    gaps = data.get("gaps", "")
-    if not isinstance(gaps, str):
-        gaps = str(gaps)
-
-    return {"consensus": consensus, "disagreements": disagreements, "gaps": gaps}
+    return ClusterAnalysisResult.model_validate(data)
 
 
 # ── Per-cluster analysis ───────────────────────────────────────────────────
@@ -87,27 +114,52 @@ def analyze_cluster(
     headline: str,
     articles: list,
 ) -> dict | None:
-    messages = [
+    base_messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": _build_prompt(headline, articles)},
     ]
+
+    json_schema = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "ClusterAnalysisResult",
+            "schema": ClusterAnalysisResult.model_json_schema(),
+            "strict": False,
+        },
+    }
+
     logger.debug("Sending cluster #{} '{}' to LLM", cluster_id, headline[:60])
 
-    last_exc: Exception | None = None
+    last_exc: str | None = None
     for attempt in range(MAX_RETRIES + 1):
+        messages = list(base_messages)
+
+        # On retry, inject the validation error as a correction prompt
+        if attempt > 0 and last_exc:
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Your previous response failed validation with this error:\n{last_exc}\n\n"
+                    "Please fix your JSON and return a valid response matching the schema exactly."
+                ),
+            })
+
         try:
             response = client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=messages,
                 temperature=LLM_TEMPERATURE,
-                response_format={"type": "json_object"},
+                response_format=json_schema,
             )
             raw = response.choices[0].message.content or ""
             logger.debug("Cluster {} raw (attempt {}):\n{}", cluster_id, attempt + 1, raw)
-            return _parse(raw)
-        except (json.JSONDecodeError, ValueError) as exc:
-            last_exc = exc
-            logger.warning("Parse error cluster {} attempt {}: {}", cluster_id, attempt + 1, exc)
+            result = _parse_and_validate(raw)
+            return result.model_dump()
+        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            last_exc = str(exc)
+            logger.warning(
+                "Parse/validation error cluster {} attempt {}: {}", cluster_id, attempt + 1, exc
+            )
         except Exception as exc:
             logger.error("API error cluster {}: {}", cluster_id, exc)
             raise
@@ -151,7 +203,10 @@ def run_analysis() -> tuple[int, str | None]:
                 logger.debug("Cluster #{} has < 2 articles, skipping.", cluster_id)
                 continue
 
-            logger.info("Analyzing cluster #{} '{}' ({} articles)", cluster_id, headline[:60], len(articles))
+            logger.info(
+                "Analyzing cluster #{} '{}' ({} articles)",
+                cluster_id, headline[:60], len(articles),
+            )
 
             try:
                 result = analyze_cluster(client, cluster_id, headline, articles)
@@ -163,16 +218,22 @@ def run_analysis() -> tuple[int, str | None]:
             if result is None:
                 continue
 
+            # result is ClusterAnalysisResult.model_dump() — all keys guaranteed
             insert_cluster_analysis(
                 cluster_id=cluster_id,
-                consensus=result["consensus"],
-                disagreements=result["disagreements"],
-                gaps=result["gaps"],
+                summary=result["summary"],
+                shared_ground=result["shared_ground"],
+                left_not_right=result["left_not_right"],
+                right_not_left=result["right_not_left"],
+                center_angle=result["center_angle"],
                 conn=conn,
             )
             logger.info(
-                "Cluster #{} → {} consensus, {} disagreements",
-                cluster_id, len(result["consensus"]), len(result["disagreements"]),
+                "Cluster #{} → {} shared, {} left≠right, {} right≠left",
+                cluster_id,
+                len(result["shared_ground"]),
+                len(result["left_not_right"]),
+                len(result["right_not_left"]),
             )
             analyzed += 1
 

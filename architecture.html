@@ -1,944 +1,487 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MediaLens — Architecture</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-
-    body {
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      background: #0f172a;
-      color: #e2e8f0;
-      padding: 48px 24px;
-    }
-
-    h2 {
-      font-size: 0.65rem;
-      font-weight: 700;
-      letter-spacing: 0.18em;
-      text-transform: uppercase;
-      color: #475569;
-      margin-bottom: 28px;
-      padding-bottom: 10px;
-      border-bottom: 1px solid #1e293b;
-    }
-
-    /* ─── SHARED ─────────────────────────────────────── */
-    .wrap { max-width: 920px; margin: 0 auto; }
-
-    .app-title {
-      text-align: center;
-      font-size: 1.5rem;
-      font-weight: 700;
-      letter-spacing: 0.25em;
-      color: #f8fafc;
-      border: 2px solid #334155;
-      border-radius: 8px;
-      padding: 14px;
-      margin-bottom: 56px;
-    }
-
-    .section { margin-bottom: 72px; }
-
-    /* ─── PIPELINE ───────────────────────────────────── */
-    .pipeline {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 0;
-    }
-
-    .p-sources {
-      display: flex;
-      gap: 12px;
-      margin-bottom: 4px;
-    }
-
-    .p-source {
-      flex: 1;
-      max-width: 190px;
-      border-radius: 8px;
-      padding: 12px;
-      text-align: center;
-    }
-    .p-source.left   { background: rgba(59,130,246,.1); border: 1px solid #3b82f6; }
-    .p-source.center { background: rgba(107,114,128,.1); border: 1px solid #6b7280; }
-    .p-source.right  { background: rgba(239,68,68,.1); border: 1px solid #ef4444; }
-
-    .p-source .lean {
-      font-size: 0.6rem;
-      font-weight: 700;
-      letter-spacing: 0.1em;
-      margin-bottom: 5px;
-    }
-    .p-source.left   .lean { color: #60a5fa; }
-    .p-source.center .lean { color: #9ca3af; }
-    .p-source.right  .lean { color: #f87171; }
-
-    .p-source .outlets { font-size: 0.7rem; color: #94a3b8; line-height: 1.7; }
-
-    .arr {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      padding: 6px 0;
-      gap: 3px;
-    }
-    .arr-line { width: 1px; height: 20px; background: #334155; }
-    .arr-label { font-size: 0.6rem; color: #475569; font-style: italic; }
-    .arr-head { font-size: 8px; color: #334155; }
-
-    .p-box {
-      width: 380px;
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 8px;
-      padding: 14px 18px;
-    }
-
-    .p-box-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      margin-bottom: 10px;
-    }
-
-    .p-step { font-size: 0.78rem; font-weight: 700; color: #f1f5f9; }
-    .p-file { font-family: monospace; font-size: 0.6rem; color: #475569; }
-
-    .p-items { list-style: none; font-size: 0.7rem; color: #94a3b8; line-height: 1.9; }
-    .p-items li::before { content: '• '; color: #475569; }
-
-    .pill {
-      display: inline-block;
-      font-size: 0.58rem;
-      padding: 1px 6px;
-      border-radius: 4px;
-      background: #0f172a;
-      border: 1px solid #334155;
-      color: #7dd3fc;
-      font-family: monospace;
-      margin-left: 4px;
-    }
-    .pill.green { color: #4ade80; border-color: #166534; }
-    .pill.orange { color: #fb923c; border-color: #7c2d12; }
-
-    /* ─── CLUSTER vs ARTICLE comparison ─────────────── */
-    .compare-cards {
-      display: flex;
-      gap: 16px;
-      margin-top: 8px;
-    }
-
-    .c-card {
-      flex: 1;
-      border-radius: 8px;
-      padding: 14px 16px;
-    }
-    .c-card.old { background: rgba(239,68,68,.06); border: 1px solid #7f1d1d; }
-    .c-card.new { background: rgba(74,222,128,.06); border: 1px solid #166534; }
-
-    .c-card-title {
-      font-size: 0.65rem;
-      font-weight: 700;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      margin-bottom: 8px;
-    }
-    .c-card.old .c-card-title { color: #f87171; }
-    .c-card.new .c-card-title { color: #4ade80; }
-
-    .c-card-body { font-size: 0.68rem; color: #94a3b8; line-height: 1.8; }
-
-    /* ─── DB ─────────────────────────────────────────── */
-    .db-box {
-      width: 460px;
-      background: #052e16;
-      border: 1px solid #166534;
-      border-radius: 8px;
-      padding: 16px 20px;
-    }
-
-    .db-head {
-      display: flex;
-      justify-content: space-between;
-      font-size: 0.78rem;
-      font-weight: 700;
-      color: #4ade80;
-      margin-bottom: 12px;
-    }
-
-    .db-file { font-family: monospace; font-size: 0.6rem; opacity: .7; }
-
-    .db-tables { display: flex; gap: 14px; }
-
-    .db-t { flex: 1; }
-    .db-t-name { font-size: 0.68rem; font-weight: 700; color: #4ade80; margin-bottom: 4px; }
-    .db-field { font-family: monospace; font-size: 0.6rem; color: #86efac; line-height: 1.85; }
-
-    /* ─── LAYER CONNECTORS ───────────────────────────── */
-    .lconn {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 4px;
-      padding: 18px 0;
-    }
-    .lconn-line { width: 1px; height: 36px; }
-    .lconn-label { font-size: 0.6rem; color: #475569; font-style: italic; }
-    .lconn-head { font-size: 8px; }
-
-    /* ─── REACT SECTION ──────────────────────────────── */
-
-    .react-outer {
-      border: 1px solid #1d4ed8;
-      border-radius: 12px;
-      background: #0d1b3e;
-      padding: 28px;
-    }
-
-    /* User query pill */
-    .user-query {
-      display: inline-block;
-      background: #1e3a5f;
-      border: 1px solid #3b82f6;
-      border-radius: 20px;
-      padding: 8px 20px;
-      font-size: 0.78rem;
-      color: #93c5fd;
-      margin-bottom: 28px;
-    }
-
-    /* ReAct loop row */
-    .react-loop {
-      display: flex;
-      gap: 0;
-      align-items: stretch;
-      margin-bottom: 32px;
-    }
-
-    /* Left: LLM brain column */
-    .react-brain {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      width: 140px;
-      flex-shrink: 0;
-    }
-
-    .brain-box {
-      background: #172554;
-      border: 2px solid #3b82f6;
-      border-radius: 10px;
-      padding: 12px 16px;
-      text-align: center;
-      width: 100%;
-    }
-
-    .brain-title { font-size: 0.82rem; font-weight: 700; color: #93c5fd; }
-    .brain-sub   { font-size: 0.6rem; color: #475569; margin-top: 3px; }
-
-    /* Center: iterations */
-    .react-iterations {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      padding: 0 20px;
-    }
-
-    .iter {
-      border-radius: 8px;
-      overflow: hidden;
-      border: 1px solid #1e293b;
-    }
-
-    .iter-think {
-      background: #1a1f35;
-      padding: 8px 12px;
-      font-size: 0.68rem;
-      color: #a5b4fc;
-      border-bottom: 1px solid #1e293b;
-    }
-
-    .iter-think::before {
-      content: 'ДУМАЕТ  ';
-      font-size: 0.55rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-      color: #4f46e5;
-      margin-right: 4px;
-    }
-
-    .iter-act {
-      background: #0f172a;
-      padding: 7px 12px;
-      font-family: monospace;
-      font-size: 0.66rem;
-      color: #7dd3fc;
-      border-bottom: 1px solid #1e293b;
-    }
-
-    .iter-act::before {
-      content: 'ВЫЗЫВАЕТ  ';
-      font-size: 0.55rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-      color: #0284c7;
-      font-family: sans-serif;
-      margin-right: 4px;
-    }
-
-    .iter-obs {
-      background: #0a1628;
-      padding: 7px 12px;
-      font-size: 0.64rem;
-      color: #64748b;
-    }
-
-    .iter-obs::before {
-      content: 'ВИДИТ  ';
-      font-size: 0.55rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-      color: #334155;
-      margin-right: 4px;
-    }
-
-    /* Right: tools column */
-    .react-tools {
-      width: 210px;
-      flex-shrink: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .tool-chip {
-      background: #0f172a;
-      border: 1px solid #334155;
-      border-radius: 6px;
-      padding: 6px 10px;
-      font-family: monospace;
-      font-size: 0.63rem;
-      color: #475569;
-      transition: none;
-    }
-
-    .tool-chip.active {
-      border-color: #0284c7;
-      color: #7dd3fc;
-      background: #0c1a2e;
-    }
-
-    .tools-label {
-      font-size: 0.6rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: #334155;
-      margin-bottom: 4px;
-    }
-
-    /* Final answer */
-    .final-answer {
-      background: #0f2810;
-      border: 1px solid #166534;
-      border-radius: 8px;
-      padding: 14px 18px;
-    }
-
-    .fa-label {
-      font-size: 0.6rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: #4ade80;
-      margin-bottom: 8px;
-    }
-
-    .fa-body { font-size: 0.72rem; color: #86efac; line-height: 1.8; }
-
-    .fa-body strong { color: #4ade80; }
-
-    /* ─── Cluster-level analysis explainer ──────────── */
-    .cluster-explainer {
-      display: flex;
-      gap: 20px;
-      align-items: flex-start;
-    }
-
-    .ce-input {
-      flex: 1;
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 8px;
-      padding: 14px;
-    }
-
-    .ce-arrow {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 4px;
-      padding-top: 40px;
-      color: #475569;
-      font-size: 0.65rem;
-    }
-
-    .ce-output {
-      flex: 1;
-      background: #052e16;
-      border: 1px solid #166534;
-      border-radius: 8px;
-      padding: 14px;
-    }
-
-    .ce-title {
-      font-size: 0.62rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      margin-bottom: 10px;
-    }
-
-    .ce-input .ce-title { color: #475569; }
-    .ce-output .ce-title { color: #4ade80; }
-
-    .ce-article {
-      border-left: 2px solid;
-      padding: 6px 10px;
-      margin-bottom: 6px;
-      font-size: 0.66rem;
-      color: #94a3b8;
-      line-height: 1.6;
-    }
-    .ce-article.left   { border-color: #3b82f6; }
-    .ce-article.center { border-color: #6b7280; }
-    .ce-article.right  { border-color: #ef4444; }
-
-    .ce-article .src {
-      font-size: 0.58rem;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      display: block;
-      margin-bottom: 2px;
-    }
-    .ce-article.left   .src { color: #60a5fa; }
-    .ce-article.center .src { color: #9ca3af; }
-    .ce-article.right  .src { color: #f87171; }
-
-    .ce-output-item {
-      border-bottom: 1px solid #1a3a2a;
-      padding: 7px 0;
-      font-size: 0.68rem;
-      color: #86efac;
-      line-height: 1.7;
-    }
-
-    .ce-output-item:last-child { border-bottom: none; }
-
-    .ce-output-item .key {
-      font-size: 0.58rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: #4ade80;
-      display: block;
-      margin-bottom: 2px;
-    }
-
-    /* ─── UI layer ───────────────────────────────────── */
-    .ui-wrap {
-      display: flex;
-      gap: 16px;
-    }
-
-    .sidebar {
-      width: 160px;
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 8px;
-      padding: 14px;
-    }
-
-    .sidebar-title {
-      font-size: 0.6rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: #475569;
-      margin-bottom: 10px;
-    }
-
-    .btn {
-      display: block;
-      font-size: 0.62rem;
-      padding: 4px 8px;
-      background: #0f172a;
-      border: 1px solid #334155;
-      border-radius: 4px;
-      color: #94a3b8;
-      margin-bottom: 5px;
-      text-align: center;
-    }
-
-    .tabs-box {
-      flex: 1;
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 8px;
-      overflow: hidden;
-    }
-
-    .tabs-head { display: flex; border-bottom: 1px solid #334155; }
-
-    .tab {
-      flex: 1;
-      text-align: center;
-      padding: 9px;
-      font-size: 0.65rem;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      color: #475569;
-      border-right: 1px solid #334155;
-    }
-
-    .tab:last-child { border-right: none; }
-    .tab.active { color: #f8fafc; background: #0f172a; }
-
-    .tab-content { display: flex; }
-
-    .tab-pane {
-      flex: 1;
-      padding: 14px;
-      font-size: 0.67rem;
-      color: #94a3b8;
-      line-height: 1.8;
-      border-right: 1px solid #1e293b;
-    }
-
-    .tab-pane:last-child { border-right: none; }
-
-    .lean-bar {
-      display: flex;
-      height: 5px;
-      border-radius: 3px;
-      overflow: hidden;
-      margin: 6px 0;
-    }
-
-    .l { background: #3b82f6; flex: 1; }
-    .c { background: #6b7280; flex: 1; }
-    .r { background: #ef4444; flex: 1; }
-
-    /* ─── Bottom compare table ───────────────────────── */
-    .btable {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.7rem;
-      margin-top: 56px;
-    }
-
-    .btable th {
-      text-align: left;
-      padding: 8px 14px;
-      font-size: 0.6rem;
-      font-weight: 700;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: #475569;
-      border-bottom: 1px solid #1e293b;
-    }
-
-    .btable td {
-      padding: 9px 14px;
-      color: #94a3b8;
-      border-bottom: 1px solid #1e293b;
-      vertical-align: top;
-    }
-
-    .btable tr:last-child td { border-bottom: none; }
-    .btable td:first-child { color: #e2e8f0; font-weight: 600; width: 160px; }
-  </style>
+<meta charset="UTF-8">
+<title>MediaLens — Agent Architecture</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    padding: 40px 32px;
+    min-height: 100vh;
+  }
+
+  h1 {
+    font-size: 1.6rem;
+    font-weight: 700;
+    color: #f8fafc;
+    margin-bottom: 6px;
+  }
+  .subtitle {
+    color: #64748b;
+    font-size: 0.9rem;
+    margin-bottom: 48px;
+  }
+
+  .agents-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+    max-width: 1200px;
+  }
+
+  .agent-card {
+    background: #1e2130;
+    border-radius: 16px;
+    padding: 28px;
+    border: 1px solid #2d3148;
+  }
+
+  .agent-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .agent-icon {
+    width: 40px; height: 40px;
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.2rem;
+    flex-shrink: 0;
+  }
+  .icon-research  { background: #1d3a5f; }
+  .icon-factcheck { background: #3b1d1d; }
+
+  .agent-name { font-size: 1.1rem; font-weight: 700; color: #f1f5f9; }
+  .agent-desc { font-size: 0.78rem; color: #64748b; margin-top: 2px; }
+
+  .section-label {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #475569;
+    margin-bottom: 10px;
+  }
+
+  .steps { margin-bottom: 24px; }
+  .step {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .step-num {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 700;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .num-research  { background: #1e40af; color: #93c5fd; }
+  .num-factcheck { background: #7f1d1d; color: #fca5a5; }
+
+  .step-text { font-size: 0.82rem; color: #cbd5e1; line-height: 1.4; }
+  .step-text strong { color: #f1f5f9; font-weight: 600; }
+  .step-text .tag {
+    display: inline-block;
+    background: #1e293b;
+    color: #94a3b8;
+    font-family: monospace;
+    font-size: 0.72rem;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid #334155;
+  }
+
+  .loop-box {
+    border: 1px dashed #334155;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 24px;
+  }
+  .loop-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #64748b;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .loop-title span {
+    background: #1e293b;
+    color: #64748b;
+    padding: 1px 7px;
+    border-radius: 20px;
+    font-size: 0.65rem;
+  }
+  .loop-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    font-size: 0.8rem;
+    color: #94a3b8;
+  }
+  .loop-row:last-child { margin-bottom: 0; }
+  .arrow { color: #475569; font-size: 0.75rem; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge-blue  { background: #1e3a5f; color: #60a5fa; }
+  .badge-green { background: #14532d; color: #4ade80; }
+
+  .tools-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .tool-chip {
+    background: #111827;
+    border: 1px solid #1f2937;
+    border-radius: 8px;
+    padding: 8px 10px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .tool-chip.exclusive {
+    border-color: #7f1d1d;
+    background: #1a0a0a;
+  }
+  .tool-icon { font-size: 0.85rem; margin-top: 1px; flex-shrink: 0; }
+  .tool-name {
+    font-family: monospace;
+    font-size: 0.72rem;
+    color: #60a5fa;
+    font-weight: 600;
+    display: block;
+    margin-bottom: 2px;
+  }
+  .tool-chip.exclusive .tool-name { color: #f87171; }
+  .tool-what { font-size: 0.7rem; color: #475569; line-height: 1.3; }
+
+  .verdict-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
+  .verdict-chip {
+    padding: 4px 10px;
+    border-radius: 8px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+
+  .output-box {
+    background: #111827;
+    border: 1px solid #1f2937;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-top: 20px;
+  }
+  .output-section {
+    font-size: 0.78rem;
+    color: #94a3b8;
+    padding: 4px 0;
+    border-bottom: 1px solid #1f2937;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .output-section:last-child { border-bottom: none; }
+  .output-section .hd {
+    font-family: monospace;
+    font-size: 0.7rem;
+    color: #3b82f6;
+    flex-shrink: 0;
+  }
+
+  .shared-note {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.75rem;
+    color: #475569;
+    margin-bottom: 10px;
+  }
+  .shared-note::before {
+    content: '';
+    display: block;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: #1e3a5f;
+    flex-shrink: 0;
+  }
+</style>
 </head>
 <body>
-<div class="wrap">
 
-  <div class="app-title">MEDIALENS</div>
+<h1>MediaLens — Agent Architecture</h1>
+<p class="subtitle">Two LLM agents, one shared tool set, one exclusive web-search tool.</p>
 
-  <!-- ═══════════════════════════════════════════════════════
-       SECTION 1 — PIPELINE
-  ══════════════════════════════════════════════════════════ -->
-  <div class="section">
-    <h2>01 — Слой данных · фоновый пайплайн</h2>
+<div class="agents-grid">
 
-    <div class="pipeline">
-
-      <!-- Sources -->
-      <div class="p-sources">
-        <div class="p-source left">
-          <div class="lean">ЛЕВЫЕ</div>
-          <div class="outlets">Guardian · HuffPost · NPR</div>
-        </div>
-        <div class="p-source center">
-          <div class="lean">ЦЕНТР</div>
-          <div class="outlets">Reuters · BBC · AP</div>
-        </div>
-        <div class="p-source right">
-          <div class="lean">ПРАВЫЕ</div>
-          <div class="outlets">Fox News · Daily Wire · Breitbart</div>
-        </div>
-      </div>
-
-      <div class="arr">
-        <div class="arr-line"></div>
-        <span class="arr-label">RSS-фиды</span>
-        <span class="arr-head">▼</span>
-      </div>
-
-      <!-- Ingestion -->
-      <div class="p-box">
-        <div class="p-box-head">
-          <span class="p-step">1. INGESTION</span>
-          <span class="p-file">ingestion.py</span>
-        </div>
-        <ul class="p-items">
-          <li>fetch RSS</li>
-          <li>extract full text <span class="pill">trafilatura</span></li>
-          <li>dedup by URL hash</li>
-          <li>фильтр статей старше 72ч</li>
-        </ul>
-      </div>
-
-      <div class="arr">
-        <div class="arr-line"></div>
-        <span class="arr-label">новые статьи → SQLite</span>
-        <span class="arr-head">▼</span>
-      </div>
-
-      <!-- Clustering -->
-      <div class="p-box">
-        <div class="p-box-head">
-          <span class="p-step">2. CLUSTERING</span>
-          <span class="p-file">clustering.py</span>
-        </div>
-        <ul class="p-items">
-          <li>embed title + 300-char snippet <span class="pill">all-MiniLM-L6-v2</span></li>
-          <li>cosine sim против центроидов кластеров</li>
-          <li>≥ 0.75 → добавить в кластер, пересчитать центроид</li>
-          <li>&lt; 0.75 → создать новый кластер</li>
-          <li>ready = кластер содержит ≥ 2 разных лина</li>
-        </ul>
-      </div>
-
-      <div class="arr">
-        <div class="arr-line"></div>
-        <span class="arr-label">кластер готов</span>
-        <span class="arr-head">▼</span>
-      </div>
-
-      <!-- Analysis — per cluster vs per article -->
-      <div class="p-box" style="width:560px">
-        <div class="p-box-head">
-          <span class="p-step">3. CLUSTER ANALYSIS</span>
-          <span class="p-file">analysis.py</span>
-        </div>
-        <div class="compare-cards">
-          <div class="c-card old">
-            <div class="c-card-title">Было: per article</div>
-            <div class="c-card-body">
-              N вызовов LLM на кластер<br>
-              Каждая статья → bias_score<br>
-              LLM не видит другие статьи<br>
-              Дорого, медленно, нет сравнения
-            </div>
-          </div>
-          <div class="c-card new">
-            <div class="c-card-title">Стало: per cluster</div>
-            <div class="c-card-body">
-              1 вызов LLM на кластер<br>
-              LLM видит все статьи сразу<br>
-              Возвращает: консенсус, расхождения, пробелы<br>
-              Дёшево, быстро, сравнительный анализ
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="arr">
-        <div class="arr-line"></div>
-        <span class="arr-head">▼</span>
-      </div>
-
-      <!-- DB -->
-      <div class="db-box">
-        <div class="db-head">
-          <span>SQLite DB</span>
-          <span class="db-file">data/medialens.db</span>
-        </div>
-        <div class="db-tables">
-          <div class="db-t">
-            <div class="db-t-name">articles</div>
-            <div class="db-field">id, url, title<br>body, source_lean<br>cluster_id</div>
-          </div>
-          <div class="db-t">
-            <div class="db-t-name">clusters</div>
-            <div class="db-field">id, headline<br>lean_coverage<br>ready_for_analysis</div>
-          </div>
-          <div class="db-t">
-            <div class="db-t-name">cluster_analysis</div>
-            <div class="db-field">cluster_id<br>consensus[]<br>disagreements[]<br>gaps</div>
-          </div>
-        </div>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- ═══════════════════════════════════════════════════════
-       SECTION 2 — HOW CLUSTER ANALYSIS WORKS
-  ══════════════════════════════════════════════════════════ -->
-  <div class="section">
-    <h2>02 — Как работает кластерный анализ</h2>
-
-    <div class="cluster-explainer">
-
-      <!-- Input -->
-      <div class="ce-input">
-        <div class="ce-title">Вход: все статьи кластера</div>
-
-        <div class="ce-article left">
-          <span class="src">LEFT · Guardian</span>
-          "Border crossings hit record — experts cite economic desperation"
-        </div>
-        <div class="ce-article center">
-          <span class="src">CENTER · Reuters</span>
-          "Crossings reach 2.4M, officials weigh policy response"
-        </div>
-        <div class="ce-article right">
-          <span class="src">RIGHT · Fox News</span>
-          "Invasion at the border: crime spikes in border towns"
-        </div>
-
-        <div style="margin-top:12px;font-size:0.62rem;color:#475569">
-          LLM получает: заголовок + 300 символов каждой статьи.<br>
-          Embeddings — только для поиска, LLM их не видит.
-        </div>
-      </div>
-
-      <!-- Arrow -->
-      <div class="ce-arrow">
-        <div style="width:1px;height:30px;background:#334155"></div>
-        <span>1 вызов LLM</span>
-        <div style="font-size:9px;color:#334155">▶</div>
-      </div>
-
-      <!-- Output -->
-      <div class="ce-output">
-        <div class="ce-title">Выход: кластерный анализ</div>
-        <div class="ce-output-item">
-          <span class="key">Консенсус</span>
-          Все источники признают рекордный уровень пересечений границы и необходимость политического ответа.
-        </div>
-        <div class="ce-output-item">
-          <span class="key">Расхождения</span>
-          Левые: экономические причины. Правые: угроза безопасности. Центр: нейтральные цифры.
-        </div>
-        <div class="ce-output-item">
-          <span class="key">Пробелы</span>
-          Правые источники не упоминают экономических факторов миграции. Левые избегают данных о преступности.
-        </div>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- ═══════════════════════════════════════════════════════
-       SECTION 3 — RESEARCH AGENT (ReAct)
-  ══════════════════════════════════════════════════════════ -->
-  <div class="section">
-    <h2>03 — Research Agent · петля рассуждений ReAct</h2>
-
-    <div style="margin-bottom:20px;font-size:0.7rem;color:#64748b;line-height:1.7">
-      ReAct = <strong style="color:#a5b4fc">Reason</strong> + <strong style="color:#7dd3fc">Act</strong>.
-      Агент не делает всё за один шаг — он думает, вызывает инструмент, смотрит на результат, думает снова.
-      Количество итераций зависит от сложности вопроса.
-    </div>
-
-    <div class="react-outer">
-
-      <!-- User query -->
+  <!-- ══════════ RESEARCH AGENT ══════════ -->
+  <div class="agent-card">
+    <div class="agent-header">
+      <div class="agent-icon icon-research">🔎</div>
       <div>
-        <div class="user-query">Пользователь: «Как Fox освещает тему иммиграции?»</div>
-      </div>
-
-      <div class="react-loop">
-
-        <!-- Brain -->
-        <div class="react-brain">
-          <div class="brain-box">
-            <div class="brain-title">LLM</div>
-            <div class="brain-sub">DeepSeek</div>
-            <div class="brain-sub">via OpenRouter</div>
-          </div>
-          <div style="width:1px;flex:1;background:linear-gradient(#3b82f6 0%,#1e3a5f 100%);margin-top:8px"></div>
-        </div>
-
-        <!-- Iterations -->
-        <div class="react-iterations">
-
-          <!-- iter 1 -->
-          <div class="iter">
-            <div class="iter-think">Нужно проверить свежесть данных перед тем, как отвечать.</div>
-            <div class="iter-act">get_database_stats()</div>
-            <div class="iter-obs">{ total_articles: 847, ready_clusters: 23, last_fetched: "2h ago" }</div>
-          </div>
-
-          <!-- iter 2 -->
-          <div class="iter">
-            <div class="iter-think">Данные свежие. Ищу кластеры по теме иммиграции.</div>
-            <div class="iter-act">search_stories("immigration border", top_k=3)</div>
-            <div class="iter-obs">[{ cluster_id: 7, headline: "Border crossings at record high", similarity: 0.91 }, { cluster_id: 12, headline: "Senate debates immigration bill", similarity: 0.74 }]</div>
-          </div>
-
-          <!-- iter 3 -->
-          <div class="iter">
-            <div class="iter-think">Кластер 7 наиболее релевантен. Запрашиваю разбивку по линам — мне нужно именно то, что пишет правая пресса.</div>
-            <div class="iter-act">get_lean_breakdown(7)</div>
-            <div class="iter-obs">{ right: [{ source: "Fox News", framing: "invasion framing, crime statistics" }, { source: "Daily Wire", framing: "border security failure" }], left: [...], center: [...] }</div>
-          </div>
-
-          <!-- iter 4 -->
-          <div class="iter">
-            <div class="iter-think">У меня достаточно. Fox и Daily Wire используют язык «вторжения» и акцентируют преступность. Левые и центр этого не делают. Готов ответить.</div>
-            <div class="iter-act" style="color:#4ade80">— завершение, финальный ответ —</div>
-          </div>
-
-        </div>
-
-        <!-- Tools -->
-        <div class="react-tools">
-          <div class="tools-label">Tools</div>
-          <div class="tool-chip active">get_database_stats()</div>
-          <div class="tool-chip active">search_stories()</div>
-          <div class="tool-chip">get_story_detail()</div>
-          <div class="tool-chip active">get_lean_breakdown()</div>
-          <div class="tool-chip">list_recent_stories()</div>
-          <div class="tool-chip">get_trending_topics()</div>
-          <div class="tool-chip">list_sources()</div>
-        </div>
-
-      </div>
-
-      <!-- Final answer -->
-      <div class="final-answer">
-        <div class="fa-label">Финальный ответ (markdown)</div>
-        <div class="fa-body">
-          <strong>Fox News и Daily Wire</strong> освещают иммиграцию через фрейм безопасности — «вторжение», статистика преступности в приграничных городах.<br><br>
-          <strong>Reuters и BBC</strong> фокусируются на цифрах пересечений и политических решениях без оценочного языка.<br><br>
-          <strong>Guardian и NPR</strong> акцентируют экономические причины миграции и гуманитарный аспект.<br><br>
-          Все источники признают рекордный уровень пересечений — это единственная точка консенсуса.
-        </div>
-      </div>
-
-    </div>
-
-    <!-- ReAct key insight -->
-    <div style="margin-top:16px;display:flex;gap:16px">
-      <div style="flex:1;background:#1a1f35;border:1px solid #312e81;border-radius:8px;padding:14px;font-size:0.68rem;color:#94a3b8;line-height:1.8">
-        <div style="color:#a5b4fc;font-size:0.6rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px">Почему не один вызов?</div>
-        Агент не знает заранее, что понадобится. На вопрос про Fox нужен <code style="color:#7dd3fc">get_lean_breakdown</code>, а не <code style="color:#7dd3fc">get_trending_topics</code>. На «что сегодня в новостях?» — наоборот. Петля позволяет адаптироваться к запросу.
-      </div>
-      <div style="flex:1;background:#1a1f35;border:1px solid #312e81;border-radius:8px;padding:14px;font-size:0.68rem;color:#94a3b8;line-height:1.8">
-        <div style="color:#a5b4fc;font-size:0.6rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px">Embeddings vs текст</div>
-        Embeddings — числовые векторы для геометрического сравнения. LLM их не читает. Для поиска похожих кластеров — embeddings. Для синтеза ответа — реальный текст статей.
+        <div class="agent-name">Research Agent</div>
+        <div class="agent-desc">src/agent.py · Ask tab</div>
       </div>
     </div>
-  </div>
 
-  <!-- ═══════════════════════════════════════════════════════
-       SECTION 4 — UI
-  ══════════════════════════════════════════════════════════ -->
-  <div class="section">
-    <h2>04 — Слой UI · Streamlit · app.py</h2>
+    <div class="section-label">Purpose</div>
+    <p style="font-size:0.82rem;color:#94a3b8;margin-bottom:20px;line-height:1.5">
+      Answers open-ended topic questions by searching the internal database and
+      synthesizing how left, center, and right outlets frame the same story.
+    </p>
 
-    <div class="ui-wrap">
-      <div class="sidebar">
-        <div class="sidebar-title">Sidebar</div>
-        <div style="font-size:0.68rem;color:#94a3b8;margin-bottom:10px">🔍 поиск историй</div>
-        <div class="btn">Ingest now</div>
-        <div class="btn">Cluster</div>
-        <div class="btn">Analyze clusters</div>
+    <div class="section-label">Tool-Calling Loop</div>
+    <div class="loop-box">
+      <div class="loop-title">Iteration <span>max 10 rounds</span></div>
+      <div class="loop-row">
+        <span>User query</span>
+        <span class="arrow">→</span>
+        <span class="badge badge-blue">LLM decides next tool</span>
       </div>
+      <div class="loop-row" style="padding-left:16px">
+        <span class="arrow">↓</span>
+        <span style="color:#475569;font-size:0.75rem">finish_reason = tool_calls</span>
+      </div>
+      <div class="loop-row">
+        <span style="padding-left:16px">Execute tool → result appended to context</span>
+      </div>
+      <div class="loop-row" style="padding-left:16px">
+        <span class="arrow">↓ repeat until done</span>
+      </div>
+      <div class="loop-row">
+        <span class="arrow">→</span>
+        <span class="badge badge-green">finish_reason = stop → final response</span>
+      </div>
+    </div>
 
-      <div class="tabs-box">
-        <div class="tabs-head">
-          <div class="tab active">STORIES</div>
-          <div class="tab">ASK</div>
-        </div>
-        <div class="tab-content">
-          <div class="tab-pane">
-            список кластеров<br>
-            <div class="lean-bar"><div class="l"></div><div class="c"></div><div class="r"></div></div>
-            детальный вид кластера:<br>
-            консенсус / расхождения<br>
-            ссылки на все статьи
-          </div>
-          <div class="tab-pane">
-            чат с Research Agent<br><br>
-            история сообщений<br>
-            <span style="color:#7dd3fc;font-size:0.63rem">▾ tools used (3)</span><br>
-            markdown ответ с цитатами
-          </div>
+    <div class="section-label">Mandatory First Step</div>
+    <div class="steps" style="margin-bottom:20px">
+      <div class="step">
+        <div class="step-num num-research">1</div>
+        <div class="step-text"><strong>Check data freshness</strong> — always calls
+          <span class="tag">get_database_stats</span> before anything else</div>
+      </div>
+    </div>
+
+    <div class="section-label">Tools (7 shared)</div>
+    <div class="tools-grid" style="margin-bottom:20px">
+      <div class="tool-chip">
+        <div class="tool-icon">🔍</div>
+        <div>
+          <span class="tool-name">search_stories</span>
+          <span class="tool-what">Cosine-similarity search over cluster headlines</span>
         </div>
       </div>
+      <div class="tool-chip">
+        <div class="tool-icon">📄</div>
+        <div>
+          <span class="tool-name">get_story_detail</span>
+          <span class="tool-what">All articles + analysis for a cluster</span>
+        </div>
+      </div>
+      <div class="tool-chip">
+        <div class="tool-icon">⚖️</div>
+        <div>
+          <span class="tool-name">get_lean_breakdown</span>
+          <span class="tool-what">Articles grouped by left / center / right</span>
+        </div>
+      </div>
+      <div class="tool-chip">
+        <div class="tool-icon">🕒</div>
+        <div>
+          <span class="tool-name">list_recent_stories</span>
+          <span class="tool-what">Latest clusters, optionally filtered by lean</span>
+        </div>
+      </div>
+      <div class="tool-chip">
+        <div class="tool-icon">📈</div>
+        <div>
+          <span class="tool-name">get_trending_topics</span>
+          <span class="tool-what">Most cross-spectrum stories by coverage breadth</span>
+        </div>
+      </div>
+      <div class="tool-chip">
+        <div class="tool-icon">🗄️</div>
+        <div>
+          <span class="tool-name">get_database_stats</span>
+          <span class="tool-what">Article/cluster counts and last fetch time</span>
+        </div>
+      </div>
+      <div class="tool-chip" style="grid-column:span 2">
+        <div class="tool-icon">📡</div>
+        <div>
+          <span class="tool-name">list_sources</span>
+          <span class="tool-what">All 9 configured RSS sources with their political lean</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-label">Required Output Structure</div>
+    <div class="output-box">
+      <div class="output-section"><span class="hd">##</span> Topic Overview</div>
+      <div class="output-section"><span class="hd">##</span> What Sources Agree On</div>
+      <div class="output-section"><span class="hd">##</span> Where Sources Disagree</div>
+      <div class="output-section"><span class="hd">##</span> How Each Lean Frames It</div>
+      <div class="output-section"><span class="hd">##</span> Notable Omissions</div>
     </div>
   </div>
 
-  <!-- ═══════════════════════════════════════════════════════
-       BOTTOM TABLE
-  ══════════════════════════════════════════════════════════ -->
-  <table class="btable">
-    <thead>
-      <tr>
-        <th></th>
-        <th>Пайплайн</th>
-        <th>Research Agent</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>Триггер</td>
-        <td>вручную / расписание</td>
-        <td>вопрос пользователя</td>
-      </tr>
-      <tr>
-        <td>БД</td>
-        <td>пишет</td>
-        <td>читает</td>
-      </tr>
-      <tr>
-        <td>LLM вызовы</td>
-        <td>1 на кластер (анализ)</td>
-        <td>1–10 итераций (рассуждение + инструменты)</td>
-      </tr>
-      <tr>
-        <td>Что даёт LLM</td>
-        <td>заголовки + сниппеты всех статей кластера</td>
-        <td>результаты инструментов + предыдущие рассуждения</td>
-      </tr>
-      <tr>
-        <td>Выход</td>
-        <td>консенсус / расхождения / пробелы → DB</td>
-        <td>markdown ответ с цитатами → UI</td>
-      </tr>
-    </tbody>
-  </table>
+  <!-- ══════════ FACT-CHECK AGENT ══════════ -->
+  <div class="agent-card">
+    <div class="agent-header">
+      <div class="agent-icon icon-factcheck">✅</div>
+      <div>
+        <div class="agent-name">Fact-Check Agent</div>
+        <div class="agent-desc">src/fact_check.py · Fact Check tab + story detail</div>
+      </div>
+    </div>
+
+    <div class="section-label">Purpose</div>
+    <p style="font-size:0.82rem;color:#94a3b8;margin-bottom:20px;line-height:1.5">
+      Verifies a specific claim using both the internal article database and
+      live web search. Follows an adversarial pattern: must find evidence
+      <em>for</em> and <em>against</em> before delivering a verdict.
+    </p>
+
+    <div class="section-label">Mandatory Steps (enforced by system prompt)</div>
+    <div class="steps" style="margin-bottom:20px">
+      <div class="step">
+        <div class="step-num num-factcheck">1</div>
+        <div class="step-text">
+          <strong>Data freshness check</strong> —
+          <span class="tag">get_database_stats</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num num-factcheck">2</div>
+        <div class="step-text">
+          <strong>Topic search</strong> —
+          <span class="tag">search_stories</span> to find related clusters
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num num-factcheck">3</div>
+        <div class="step-text">
+          <strong>Lean breakdown</strong> —
+          <span class="tag">get_lean_breakdown</span> on relevant clusters;
+          explicitly look for support <em>and</em> contradiction
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num num-factcheck">4</div>
+        <div class="step-text">
+          <strong>Live web search</strong> —
+          <span class="tag">search_web</span> (DuckDuckGo) for real-world evidence:
+          official statements, statistics, primary sources
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num num-factcheck">5</div>
+        <div class="step-text">
+          <strong>Optional detail drill-in</strong> —
+          <span class="tag">get_story_detail</span> if specific wording needs checking
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num num-factcheck">6</div>
+        <div class="step-text">
+          <strong>Deliver structured verdict</strong>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-label">Tools (7 shared + 1 exclusive)</div>
+    <div class="shared-note">Inherits all 7 research agent tools, plus:</div>
+    <div class="tools-grid" style="margin-bottom:20px">
+      <div class="tool-chip exclusive" style="grid-column:span 2">
+        <div class="tool-icon">🌐</div>
+        <div>
+          <span class="tool-name">search_web</span>
+          <span class="tool-what">
+            DuckDuckGo live web search via <code style="font-size:0.68rem;color:#f87171">ddgs</code>.
+            Returns title, URL, snippet for up to N results.
+            Used to verify facts outside the internal database.
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-label">Context Injection (story detail page)</div>
+    <div style="background:#111827;border:1px solid #1f2937;border-radius:8px;padding:10px 12px;margin-bottom:20px;font-size:0.78rem;color:#64748b;line-height:1.5">
+      When invoked inline from a story page, the headline is prepended so the
+      agent prioritises the right cluster:<br><br>
+      <code style="color:#475569;font-size:0.72rem">
+        "Context: &lt;story headline&gt;<br>
+        Claim to fact-check: &lt;user claim&gt;"
+      </code>
+    </div>
+
+    <div class="section-label">Possible Verdicts</div>
+    <div class="verdict-row">
+      <span class="verdict-chip" style="background:#052e16;color:#4ade80;border:1px solid #166534">CONFIRMED</span>
+      <span class="verdict-chip" style="background:#1c1200;color:#fbbf24;border:1px solid #92400e">DISPUTED</span>
+      <span class="verdict-chip" style="background:#1c0a00;color:#fb923c;border:1px solid #9a3412">MISLEADING</span>
+      <span class="verdict-chip" style="background:#1e293b;color:#94a3b8;border:1px solid #334155">UNVERIFIABLE</span>
+    </div>
+
+    <div class="output-box" style="margin-top:16px">
+      <div class="output-section"><span class="hd">**</span> VERDICT — one-sentence explanation</div>
+      <div class="output-section"><span class="hd">**</span> Evidence for the claim</div>
+      <div class="output-section"><span class="hd">**</span> Evidence against / complicating context</div>
+      <div class="output-section"><span class="hd">**</span> What each side emphasises (L / C / R)</div>
+      <div class="output-section"><span class="hd">**</span> Confidence assessment</div>
+    </div>
+  </div>
 
 </div>
+
+<!-- ── Shared infrastructure footer ── -->
+<div style="max-width:1200px;margin-top:28px;background:#1e2130;border:1px solid #2d3148;border-radius:16px;padding:24px 28px">
+  <div class="section-label" style="margin-bottom:14px">Shared Infrastructure</div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:24px;font-size:0.8rem;color:#94a3b8;line-height:1.6">
+    <div>
+      <div style="color:#60a5fa;font-weight:600;margin-bottom:4px">LLM</div>
+      DeepSeek v4 Flash via OpenRouter (OpenAI-compatible API).
+      Temperature 0.2. Up to 10 tool-call iterations per query.
+    </div>
+    <div>
+      <div style="color:#60a5fa;font-weight:600;margin-bottom:4px">RAG (no vector store)</div>
+      <code style="font-size:0.72rem">search_stories</code> batch-encodes all cluster headlines at query time with
+      <code style="font-size:0.72rem">all-MiniLM-L6-v2</code> and ranks by cosine similarity.
+      No Pinecone/Weaviate — fast enough for ≤350 clusters.
+    </div>
+    <div>
+      <div style="color:#60a5fa;font-weight:600;margin-bottom:4px">Storage</div>
+      All tool results read from SQLite
+      (<code style="font-size:0.72rem">data/medialens.db</code>).
+      Tool outputs serialised to JSON and returned as
+      <code style="font-size:0.72rem">role: "tool"</code> messages in the conversation.
+    </div>
+  </div>
+</div>
+
 </body>
 </html>

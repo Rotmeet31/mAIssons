@@ -111,10 +111,96 @@ def _render_agent_response(result: dict) -> None:
         st.error(result["error"])
         return
 
-    if result.get("tools_called"):
+    run_trace = result.get("run_trace")
+    if run_trace and run_trace.get("steps"):
+        steps = run_trace["steps"]
+        visible = [s for s in steps if not s["tool_name"].startswith("__")]
+        total_p = run_trace.get("total_prompt_tokens", 0)
+        total_c = run_trace.get("total_completion_tokens", 0)
+        token_label = f", {total_p + total_c:,} tokens" if (total_p + total_c) else ""
+        with st.expander(f"Execution trace ({len(visible)} steps{token_label})"):
+            for step in visible:
+                p = step.get("prompt_tokens") or 0
+                c = step.get("completion_tokens") or 0
+                summary = step["result_summary"][:80]
+                st.markdown(f"- `{step['tool_name']}` — {summary}…  *{p}p / {c}c tokens*")
+            if total_p or total_c:
+                st.caption(
+                    f"Total: {total_p:,} prompt + {total_c:,} completion"
+                    f" = {total_p + total_c:,} tokens"
+                )
+    elif result.get("tools_called"):
         with st.expander(f"Tools used ({len(result['tools_called'])})"):
             for tool in result["tools_called"]:
                 st.markdown(f"- `{tool}`")
+
+    st.markdown(result.get("response", ""))
+
+    matched = result.get("matched_clusters", [])
+    if matched:
+        st.markdown("---")
+        st.markdown("**Related stories — click to dive in**")
+        for cl in matched:
+            lean_cov = cl.get("lean_coverage", {})
+            lean_str = "  ".join(
+                f"**{k.capitalize()}** {v}" for k, v in lean_cov.items() if v
+            )
+            sim = cl.get("similarity")
+            sim_str = f"  ·  sim {sim:.2f}" if sim is not None else ""
+            label = cl["headline"]
+            with st.container():
+                col_info, col_btn = st.columns([5, 1])
+                with col_info:
+                    st.markdown(f"**{label[:90]}{'…' if len(label) > 90 else ''}**")
+                    st.caption(f"{lean_str}{sim_str}")
+                with col_btn:
+                    if st.button("View →", key=f"agent_view_{cl['cluster_id']}"):
+                        st.query_params["cluster_id"] = cl["cluster_id"]
+                        st.rerun()
+
+
+# ── Verdict helpers (defined here so Stories tab can call _render_factcheck) ──
+
+_VERDICT_COLORS = {
+    "confirmed":    ("#4ade80", "#052e16"),
+    "disputed":     ("#fbbf24", "#1c1200"),
+    "misleading":   ("#fb923c", "#1c0a00"),
+    "unverifiable": ("#94a3b8", "#1e293b"),
+}
+
+
+def _verdict_badge(verdict: str | None) -> str:
+    label = (verdict or "unknown").upper()
+    color, bg = _VERDICT_COLORS.get(verdict or "", ("#94a3b8", "#1e293b"))
+    return (
+        f'<span style="background:{bg};color:{color};border:1px solid {color};'
+        f'padding:4px 14px;border-radius:12px;font-size:0.8rem;font-weight:700;'
+        f'letter-spacing:0.08em">{label}</span>'
+    )
+
+
+def _render_factcheck(result: dict) -> None:
+    if result.get("error"):
+        st.error(result["error"])
+        return
+
+    confidence = result.get("confidence")
+    st.markdown(_verdict_badge(result.get("verdict")), unsafe_allow_html=True)
+    if confidence is not None:
+        st.progress(float(confidence), text=f"Confidence: {confidence:.0%}")
+    st.write("")
+
+    run_trace = result.get("run_trace")
+    if run_trace and run_trace.get("steps"):
+        visible = [s for s in run_trace["steps"] if not s["tool_name"].startswith("__")]
+        with st.expander(f"Evidence steps ({len(visible)})"):
+            for step in visible:
+                summary = step["result_summary"][:80]
+                st.markdown(f"- `{step['tool_name']}`: {summary}…")
+    elif result.get("tools_called"):
+        with st.expander(f"Tools used ({len(result['tools_called'])})"):
+            for t in result["tools_called"]:
+                st.markdown(f"- `{t}`")
 
     st.markdown(result.get("response", ""))
 
@@ -204,20 +290,87 @@ with tab_stories:
             ca = get_cluster_analysis(cluster_id, conn)
 
         if ca:
-            col_con, col_dis = st.columns(2)
-            with col_con:
-                st.markdown("**What sources agree on**")
-                for point in ca["consensus"]:
+            st.markdown("**Summary**")
+            st.markdown(ca.get("summary", ""))
+
+            shared = ca.get("shared_ground", [])
+            if shared:
+                st.markdown("**What all sides report**")
+                for point in shared:
                     st.markdown(f"- {point}")
-            with col_dis:
-                st.markdown("**Where sources disagree**")
-                for point in ca["disagreements"]:
-                    st.markdown(f"- {point}")
-            if ca.get("gaps") and ca["gaps"] != "None identified.":
-                st.markdown("**Coverage gaps**")
-                st.markdown(ca["gaps"])
+
+            lnr = ca.get("left_not_right", [])
+            rnl = ca.get("right_not_left", [])
+            if lnr or rnl:
+                col_left, col_right = st.columns(2)
+
+                def _coverage_badge(coverage: str) -> str:
+                    if coverage == "omitted":
+                        return '<span style="background:#ef4444;color:#fff;padding:1px 6px;border-radius:4px;font-size:0.72em">omitted</span>'
+                    return '<span style="background:#f59e0b;color:#fff;padding:1px 6px;border-radius:4px;font-size:0.72em">downplayed</span>'
+
+                with col_left:
+                    left_color = LEAN_COLORS["left"]
+                    st.markdown(
+                        f'<span style="color:{left_color};font-weight:700">Left says — Right doesn\'t</span>',
+                        unsafe_allow_html=True,
+                    )
+                    if lnr:
+                        for item in lnr:
+                            badge = _coverage_badge(item.get("coverage", "downplayed"))
+                            st.markdown(
+                                f'{badge} {item["claim"]}',
+                                unsafe_allow_html=True,
+                            )
+                    else:
+                        st.caption("No significant asymmetry found.")
+
+                with col_right:
+                    right_color = LEAN_COLORS["right"]
+                    st.markdown(
+                        f'<span style="color:{right_color};font-weight:700">Right says — Left doesn\'t</span>',
+                        unsafe_allow_html=True,
+                    )
+                    if rnl:
+                        for item in rnl:
+                            badge = _coverage_badge(item.get("coverage", "downplayed"))
+                            st.markdown(
+                                f'{badge} {item["claim"]}',
+                                unsafe_allow_html=True,
+                            )
+                    else:
+                        st.caption("No significant asymmetry found.")
+
+            center_angle = ca.get("center_angle", "")
+            if center_angle:
+                center_color = LEAN_COLORS["center"]
+                st.markdown(
+                    f'<span style="color:{center_color};font-weight:700">Center angle</span>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(center_angle)
         else:
             st.caption("Cluster analysis pending — click Analyze in the sidebar.")
+
+        st.divider()
+
+        # Inline fact-check
+        st.markdown("**Fact-check a claim**")
+        fc_key = f"fc_{cluster_id}"
+        claim_text = st.text_input(
+            "Enter a claim from this story",
+            key=f"fc_input_{cluster_id}",
+            placeholder="e.g. 'Trump says Europe doesn’t pay for defence'",
+        )
+        if st.button("Check this claim", key=f"fc_btn_{cluster_id}"):
+            if claim_text.strip():
+                with st.spinner("Fact-checking…"):
+                    fc_result = factcheck(claim_text.strip(), context=data["representative_headline"])
+                st.session_state[fc_key] = fc_result
+            else:
+                st.warning("Please enter a claim to check.")
+        if fc_key in st.session_state:
+            _render_factcheck(st.session_state[fc_key])
 
         st.divider()
 
@@ -317,40 +470,6 @@ with tab_ask:
 
 
 # ── Fact Check tab ─────────────────────────────────────────────────────────
-_VERDICT_COLORS = {
-    "confirmed":    ("#4ade80", "#052e16"),
-    "disputed":     ("#fbbf24", "#1c1200"),
-    "misleading":   ("#fb923c", "#1c0a00"),
-    "unverifiable": ("#94a3b8", "#1e293b"),
-}
-
-
-def _verdict_badge(verdict: str | None) -> str:
-    label = (verdict or "unknown").upper()
-    color, bg = _VERDICT_COLORS.get(verdict or "", ("#94a3b8", "#1e293b"))
-    return (
-        f'<span style="background:{bg};color:{color};border:1px solid {color};'
-        f'padding:4px 14px;border-radius:12px;font-size:0.8rem;font-weight:700;'
-        f'letter-spacing:0.08em">{label}</span>'
-    )
-
-
-def _render_factcheck(result: dict) -> None:
-    if result.get("error"):
-        st.error(result["error"])
-        return
-
-    st.markdown(_verdict_badge(result.get("verdict")), unsafe_allow_html=True)
-    st.write("")
-
-    if result.get("tools_called"):
-        with st.expander(f"Tools used ({len(result['tools_called'])})"):
-            for t in result["tools_called"]:
-                st.markdown(f"- `{t}`")
-
-    st.markdown(result.get("response", ""))
-
-
 with tab_factcheck:
     st.header("Fact Check")
     st.caption(

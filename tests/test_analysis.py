@@ -1,131 +1,160 @@
 """
-Tests for analysis.py
+Tests for analysis.py — _parse_and_validate and analyze_cluster.
 """
 import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 
-class TestParseResponse:
-    def test_valid_json_parsed_correctly(self):
-        from analysis import _parse_response
-        raw = json.dumps({
-            "bias_label": "left",
-            "bias_score": -0.6,
-            "confidence": 0.85,
-            "framing_summary": "Uses progressive framing.",
-        })
-        result = _parse_response(raw)
-        assert result["bias_label"] == "left"
-        assert result["bias_score"] == pytest.approx(-0.6)
-        assert result["confidence"] == pytest.approx(0.85)
+def _valid_cluster_dict(**overrides) -> dict:
+    base = {
+        "summary": "Something happened. Multiple outlets covered it. Details follow.",
+        "shared_ground": ["Both sides report X (Reuters, BBC)", "All agree on Y (AP, Fox)"],
+        "left_not_right": [{"claim": "Left emphasises civilian casualties.", "coverage": "omitted"}],
+        "right_not_left": [{"claim": "Right focuses on border security.", "coverage": "downplayed"}],
+        "center_angle": "Reuters added international reaction that neither side covered.",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestParseAndValidate:
+    def test_valid_json_returns_model(self):
+        from analysis import _parse_and_validate
+        raw = json.dumps(_valid_cluster_dict())
+        result = _parse_and_validate(raw)
+        assert result.summary.startswith("Something happened")
+        assert len(result.shared_ground) == 2
 
     def test_strips_markdown_fences(self):
-        from analysis import _parse_response
-        raw = "```json\n{\"bias_label\":\"center\",\"bias_score\":0.1,\"confidence\":0.9,\"framing_summary\":\"Neutral.\"}\n```"
-        result = _parse_response(raw)
-        assert result["bias_label"] == "center"
+        from analysis import _parse_and_validate
+        raw = "```json\n" + json.dumps(_valid_cluster_dict()) + "\n```"
+        result = _parse_and_validate(raw)
+        assert result.summary.startswith("Something happened")
 
-    def test_raises_on_invalid_bias_label(self):
-        from analysis import _parse_response
-        raw = json.dumps({
-            "bias_label": "extreme",
-            "bias_score": 0.5,
-            "confidence": 0.7,
-            "framing_summary": "Some summary.",
-        })
-        with pytest.raises(ValueError, match="bias_label"):
-            _parse_response(raw)
+    def test_strips_think_tags(self):
+        from analysis import _parse_and_validate
+        inner = json.dumps(_valid_cluster_dict())
+        raw = f"<think>model reasoning here</think>{inner}"
+        result = _parse_and_validate(raw)
+        assert len(result.shared_ground) == 2
 
-    def test_raises_on_missing_field(self):
-        from analysis import _parse_response
-        raw = json.dumps({
-            "bias_label": "right",
-            "bias_score": 0.8,
-            # confidence and framing_summary missing
-        })
-        with pytest.raises(ValueError, match="Missing fields"):
-            _parse_response(raw)
+    def test_coverage_items_parsed_correctly(self):
+        from analysis import _parse_and_validate
+        result = _parse_and_validate(json.dumps(_valid_cluster_dict()))
+        assert result.left_not_right[0].coverage == "omitted"
+        assert result.right_not_left[0].coverage == "downplayed"
 
-    def test_raises_on_out_of_range_bias_score(self):
-        from analysis import _parse_response
-        raw = json.dumps({
-            "bias_label": "right",
-            "bias_score": 2.5,
-            "confidence": 0.9,
-            "framing_summary": "Out of range.",
-        })
-        with pytest.raises(ValueError, match="bias_score out of range"):
-            _parse_response(raw)
+    def test_coerces_string_shared_ground_to_list(self):
+        from analysis import _parse_and_validate
+        data = _valid_cluster_dict(shared_ground="single string point")
+        result = _parse_and_validate(json.dumps(data))
+        assert isinstance(result.shared_ground, list)
+        assert result.shared_ground == ["single string point"]
+
+    def test_coerces_plain_string_coverage_items(self):
+        from analysis import _parse_and_validate
+        data = _valid_cluster_dict(left_not_right=["just a plain string"])
+        result = _parse_and_validate(json.dumps(data))
+        assert result.left_not_right[0].claim == "just a plain string"
+        assert result.left_not_right[0].coverage == "downplayed"
 
     def test_raises_on_invalid_json(self):
-        from analysis import _parse_response
+        from analysis import _parse_and_validate
         with pytest.raises(json.JSONDecodeError):
-            _parse_response("not json at all")
+            _parse_and_validate("not valid json")
+
+    def test_raises_on_empty_shared_ground(self):
+        from analysis import _parse_and_validate
+        data = _valid_cluster_dict(shared_ground=[])
+        with pytest.raises(ValidationError):
+            _parse_and_validate(json.dumps(data))
+
+    def test_raises_on_missing_summary(self):
+        from analysis import _parse_and_validate
+        data = {"shared_ground": ["Point 1"]}
+        with pytest.raises((ValidationError, KeyError)):
+            _parse_and_validate(json.dumps(data))
 
 
-class TestAnalyzeArticle:
-    def _make_mock_client(self, raw_response: str):
+class TestAnalyzeCluster:
+    def _make_openai_response(self, content: str, prompt_tokens: int = 100, completion_tokens: int = 50):
         usage = MagicMock()
-        usage.prompt_token_count = 100
-        usage.candidates_token_count = 50
+        usage.prompt_tokens = prompt_tokens
+        usage.completion_tokens = completion_tokens
+
+        msg = MagicMock()
+        msg.content = content
+
+        choice = MagicMock()
+        choice.message = msg
 
         response = MagicMock()
-        response.text = raw_response
-        response.usage_metadata = usage
+        response.choices = [choice]
+        response.usage = usage
+        return response
 
+    def test_successful_analysis_returns_dict(self):
+        from analysis import analyze_cluster
+        raw = json.dumps(_valid_cluster_dict())
         client = MagicMock()
-        client.models.generate_content.return_value = response
-        return client
+        client.chat.completions.create.return_value = self._make_openai_response(raw)
 
-    def test_successful_analysis(self):
-        from analysis import analyze_article
-        raw = json.dumps({
-            "bias_label": "right",
-            "bias_score": 0.7,
-            "confidence": 0.9,
-            "framing_summary": "Uses conservative framing.",
-        })
-        client = self._make_mock_client(raw)
-        result = analyze_article(client, 1, "Test title", "Test body", "Fox News")
+        result = analyze_cluster(client, cluster_id=1, headline="Test headline", articles=[
+            {"source_lean": "left", "source_name": "Guardian", "title": "T1", "body": "Body1"},
+            {"source_lean": "right", "source_name": "Fox", "title": "T2", "body": "Body2"},
+        ])
         assert result is not None
-        assert result["bias_label"] == "right"
-        assert result["prompt_tokens"] == 100
-        assert result["response_tokens"] == 50
+        assert isinstance(result["shared_ground"], list)
+        assert isinstance(result["left_not_right"], list)
+        assert isinstance(result["right_not_left"], list)
+        assert "summary" in result
+        assert "center_angle" in result
 
-    def test_retries_on_parse_failure_then_succeeds(self):
-        from analysis import analyze_article
-        good = json.dumps({
-            "bias_label": "center",
-            "bias_score": 0.0,
-            "confidence": 0.8,
-            "framing_summary": "Balanced reporting.",
-        })
-        usage = MagicMock()
-        usage.prompt_token_count = 50
-        usage.candidates_token_count = 20
-
-        bad_resp = MagicMock()
-        bad_resp.text = "invalid json"
-        bad_resp.usage_metadata = usage
-
-        good_resp = MagicMock()
-        good_resp.text = good
-        good_resp.usage_metadata = usage
+    def test_retries_on_validation_error_then_succeeds(self):
+        from analysis import analyze_cluster
+        bad_raw = json.dumps({"shared_ground": [], "summary": ""})  # fails validation
+        good_raw = json.dumps(_valid_cluster_dict())
 
         client = MagicMock()
-        client.models.generate_content.side_effect = [bad_resp, good_resp]
+        client.chat.completions.create.side_effect = [
+            self._make_openai_response(bad_raw),
+            self._make_openai_response(good_raw),
+        ]
 
-        result = analyze_article(client, 2, "Title", "Body", "Reuters")
+        result = analyze_cluster(client, cluster_id=2, headline="H", articles=[
+            {"source_lean": "left", "source_name": "G", "title": "T", "body": "B"},
+        ])
         assert result is not None
-        assert result["bias_label"] == "center"
-        assert client.models.generate_content.call_count == 2
+        assert client.chat.completions.create.call_count == 2
 
-    def test_returns_none_on_api_error(self):
-        from analysis import analyze_article
+        second_call_messages = client.chat.completions.create.call_args_list[1][1]["messages"]
+        assert any("validation" in str(m).lower() or "error" in str(m).lower()
+                   for m in second_call_messages)
+
+    def test_returns_none_after_max_retries(self):
+        from analysis import analyze_cluster
+        bad_raw = "not json at all"
         client = MagicMock()
-        client.models.generate_content.side_effect = Exception("API down")
-        result = analyze_article(client, 3, "T", "B", "S")
+        client.chat.completions.create.return_value = self._make_openai_response(bad_raw)
+
+        result = analyze_cluster(client, cluster_id=3, headline="H", articles=[
+            {"source_lean": "center", "source_name": "BBC", "title": "T", "body": "B"},
+        ])
         assert result is None
+
+    def test_raises_on_api_error(self):
+        from analysis import analyze_cluster
+        client = MagicMock()
+        client.chat.completions.create.side_effect = RuntimeError("API down")
+
+        with pytest.raises(RuntimeError, match="API down"):
+            analyze_cluster(client, cluster_id=4, headline="H", articles=[
+                {"source_lean": "left", "source_name": "G", "title": "T", "body": "B"},
+            ])

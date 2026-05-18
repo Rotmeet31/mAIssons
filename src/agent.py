@@ -1,8 +1,9 @@
 """
 MediaLens Research Agent.
 
-Tool-calling loop via OpenRouter: the LLM decides which tools to invoke,
-in what order, to answer cross-spectrum news questions.
+Phase-locked orchestrator: three mandatory phases ensure the LLM always
+orients on the data, gathers lean-breakdown evidence, and synthesises a
+validated structured response — regardless of LLM tool-calling behaviour.
 """
 import json
 import os
@@ -11,7 +12,9 @@ from typing import Any
 import numpy as np
 from loguru import logger
 from openai import OpenAI
+from pydantic import ValidationError
 
+from agent_utils import run_tool_phase
 from clustering import _get_model, embed
 from config import LLM_MODEL, LLM_TEMPERATURE, OPENROUTER_BASE_URL, RSS_SOURCES
 from database import (
@@ -19,42 +22,62 @@ from database import (
     get_cluster_analysis,
     get_cluster_with_articles_and_analysis,
     get_db,
+    get_ready_cluster_centroids,
     get_ready_clusters,
     get_top_entities,
 )
+from schemas import AgentResponse, RunTrace
 
 
 # ── Tool implementations ───────────────────────────────────────────────────
 
 def search_stories(query: str, top_k: int = 5) -> list[dict]:
+    """Semantic search against stored cluster centroids (article-body embeddings).
+    Falls back to headline encoding for clusters that pre-date centroid storage."""
     with get_db() as conn:
-        clusters = get_ready_clusters(conn)
+        rows = get_ready_cluster_centroids(conn)
 
-    if not clusters:
+    if not rows:
         return []
 
     query_vec = embed(query)
-    model = _get_model()
-    headlines = [c["representative_headline"] for c in clusters]
-    headline_vecs = model.encode(headlines, normalize_embeddings=True)
-
     scored = []
-    for i, cluster in enumerate(clusters):
-        lean_cov = json.loads(cluster["lean_coverage"])
-        sim = float(np.dot(query_vec, headline_vecs[i]))
-        scored.append({
-            "cluster_id": cluster["id"],
-            "headline": cluster["representative_headline"],
-            "lean_coverage": lean_cov,
-            "article_count": sum(lean_cov.values()),
-            "similarity": round(sim, 3),
-        })
+    no_centroid_rows = []
+
+    for row in rows:
+        if row["centroid"]:
+            centroid = np.array(json.loads(row["centroid"]))
+            sim = float(np.dot(query_vec, centroid))
+            lean_cov = json.loads(row["lean_coverage"])
+            scored.append({
+                "cluster_id": row["id"],
+                "headline": row["representative_headline"],
+                "lean_coverage": lean_cov,
+                "article_count": sum(lean_cov.values()),
+                "similarity": round(sim, 3),
+            })
+        else:
+            no_centroid_rows.append(row)
+
+    # Encode headlines in one batch for legacy clusters (no stored centroid)
+    if no_centroid_rows:
+        model = _get_model()
+        headlines = [r["representative_headline"] for r in no_centroid_rows]
+        vecs = model.encode(headlines, normalize_embeddings=True)
+        for i, row in enumerate(no_centroid_rows):
+            lean_cov = json.loads(row["lean_coverage"])
+            sim = float(np.dot(query_vec, vecs[i]))
+            scored.append({
+                "cluster_id": row["id"],
+                "headline": row["representative_headline"],
+                "lean_coverage": lean_cov,
+                "article_count": sum(lean_cov.values()),
+                "similarity": round(sim, 3),
+            })
 
     scored.sort(key=lambda x: x["similarity"], reverse=True)
     relevant = [s for s in scored if s["similarity"] >= 0.3]
-    if not relevant:
-        relevant = scored
-    return relevant[:top_k]
+    return (relevant or scored)[:top_k]
 
 
 def get_story_detail(cluster_id: int) -> dict:
@@ -210,7 +233,7 @@ def get_top_mentioned_entities(limit: int = 15, label: str | None = None) -> lis
     ]
 
 
-# ── Tool registry ──────────────────────────────────────────────────────────
+# ── Tool registry & schemas ────────────────────────────────────────────────
 
 _TOOL_FUNCTIONS: dict[str, Any] = {
     "search_stories": search_stories,
@@ -222,7 +245,6 @@ _TOOL_FUNCTIONS: dict[str, Any] = {
     "list_sources": list_sources,
 }
 
-# OpenAI-format tool schemas (used by OpenRouter)
 TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -347,36 +369,53 @@ TOOL_SCHEMAS = [
     },
 ]
 
-_SYSTEM_PROMPT = """\
-You are a cross-spectrum news research assistant for MediaLens.
 
-Your job: help users understand how news stories are covered across the political spectrum \
-(left, center, right). You have access to a database of articles ingested from outlets \
-across that spectrum, clustered into stories, and analyzed for political framing.
+# ── Phase system prompts ───────────────────────────────────────────────────
 
-Guidelines:
-- Call get_database_stats first to check data freshness before answering substantive questions.
-- Use search_stories for specific topics, list_recent_stories for open-ended browsing.
-- Use get_lean_breakdown to compare how different outlets frame the same story.
-- Cite specific outlets and article headlines in your response.
-- Identify what sources agree on, where they diverge, and notable framing differences.
-- If the database has no relevant stories, say so — do not invent coverage.
-- Format your response in markdown: use headers, bullet points, bold source names.
+_PHASE1_SYSTEM = """\
+You are the MediaLens data orientation agent.
+Your ONLY task: determine what data is available to answer the user's question.
+- You MUST call get_database_stats() first.
+- You MUST call search_stories(query=<user_query>) immediately after.
+- Do NOT produce prose. After both tool calls, stop (finish_reason=stop).
+- Do NOT call any other tools in this phase.
+"""
+
+_PHASE3_SYSTEM = """\
+You are the MediaLens synthesis agent. Pre-computed differential analyses for matched story clusters are in your context.
+Produce a cross-cluster briefing.
+
+Return ONLY valid JSON with exactly these fields:
+
+topic_overview
+  String. 2-3 sentence neutral summary of what is happening across the matched stories.
+
+shared_ground
+  JSON array of 1-4 strings. Facts all leans consistently report across the stories.
+  Each string must include inline outlet citations, e.g. "(Reuters, Fox News, Guardian)".
+
+left_emphasis
+  JSON array of 0-3 strings. Angles, figures, or frames that left outlets add across
+  the stories that right outlets omit or downplay. Be specific. Cite outlets.
+  Use [] if no significant pattern found.
+
+right_emphasis
+  JSON array of 0-3 strings. Same structure for right outlets vs left.
+
+center_angle
+  String. What center sources (AP, BBC, Reuters, Al Jazeera) uniquely add or frame
+  differently from both left and right, across the matched stories.
+  Empty string "" if center simply follows both sides.
+
+Rules:
+- Base your response ONLY on evidence in this conversation.
+- Do NOT invent outlet names, headlines, or claims not present in the evidence.
+- Be specific. Name angles and cite outlets.
+- If only one lean is represented, set the missing side's field to [].
 """
 
 
-# ── Agent loop ─────────────────────────────────────────────────────────────
-
-def _execute_tool(name: str, args: dict) -> Any:
-    fn = _TOOL_FUNCTIONS.get(name)
-    if fn is None:
-        return {"error": f"Unknown tool: {name}"}
-    try:
-        return fn(**args)
-    except Exception as exc:
-        logger.error("Tool {} failed with args {}: {}", name, args, exc)
-        return {"error": str(exc)}
-
+# ── Helpers ────────────────────────────────────────────────────────────────
 
 def _get_client() -> OpenAI:
     api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -385,66 +424,217 @@ def _get_client() -> OpenAI:
     return OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
 
 
+def _fetch_cluster_contexts(cluster_ids: list[int]) -> list[dict]:
+    """
+    For each cluster: fetch pre-computed cluster_analysis if available.
+    Falls back to get_lean_breakdown (raw article titles) for unanalyzed clusters.
+    Returns a list of context dicts ready to be formatted into the synthesis prompt.
+    """
+    contexts = []
+    for cid in cluster_ids:
+        with get_db() as conn:
+            ca = get_cluster_analysis(cid, conn)
+            data = get_cluster_with_articles_and_analysis(cid, conn)
+        if not data:
+            continue
+        lean_cov = data.get("lean_coverage", {})
+        entry: dict = {
+            "cluster_id": cid,
+            "headline": data.get("representative_headline", ""),
+            "lean_coverage": lean_cov,
+            "has_analysis": ca is not None,
+        }
+        if ca:
+            entry["analysis"] = ca
+        else:
+            entry["analysis"] = get_lean_breakdown(cid)
+        contexts.append(entry)
+    return contexts
+
+
+def _format_cluster_contexts(contexts: list[dict]) -> str:
+    """Render cluster contexts as structured text for the Phase 3 synthesis prompt."""
+    parts = []
+    for ctx in contexts:
+        lines = [f"### Story: {ctx['headline']} (cluster {ctx['cluster_id']})"]
+        if ctx.get("has_analysis"):
+            ca = ctx["analysis"]
+            lines.append(f"Summary: {ca.get('summary', '')}")
+            if ca.get("shared_ground"):
+                lines.append("Shared ground:")
+                for s in ca["shared_ground"]:
+                    lines.append(f"  - {s}")
+            if ca.get("left_not_right"):
+                lines.append("Left emphasizes (right omits/downplays):")
+                for item in ca["left_not_right"]:
+                    lines.append(f"  - [{item.get('coverage', '?')}] {item.get('claim', '')}")
+            if ca.get("right_not_left"):
+                lines.append("Right emphasizes (left omits/downplays):")
+                for item in ca["right_not_left"]:
+                    lines.append(f"  - [{item.get('coverage', '?')}] {item.get('claim', '')}")
+            if ca.get("center_angle"):
+                lines.append(f"Center angle: {ca['center_angle']}")
+        else:
+            bd = ctx.get("analysis", {})
+            if isinstance(bd, dict) and "breakdown" in bd:
+                for lean, articles in bd["breakdown"].items():
+                    if articles:
+                        titles = "; ".join(a["title"] for a in articles[:3])
+                        lines.append(f"{lean.capitalize()} articles: {titles}")
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts) if parts else "No cluster data available."
+
+
+def _to_markdown(r: AgentResponse) -> str:
+    lines = [
+        "## Overview",
+        r.topic_overview,
+        "",
+        "## What All Sides Report",
+        *[f"- {point}" for point in r.shared_ground],
+        "",
+    ]
+    if r.left_emphasis:
+        lines += ["## Left Covers — Right Doesn't", *[f"- {point}" for point in r.left_emphasis], ""]
+    if r.right_emphasis:
+        lines += ["## Right Covers — Left Doesn't", *[f"- {point}" for point in r.right_emphasis], ""]
+    if r.center_angle:
+        lines += ["## Center Angle", r.center_angle, ""]
+    return "\n".join(lines)
+
+
+# ── Phase-locked agent ─────────────────────────────────────────────────────
+
 def ask(query: str) -> dict:
     """
-    Run the research agent loop.
+    Run the research agent through three locked phases.
 
-    Returns: { response: str, tools_called: list[str], error: str | None }
+    Returns:
+        response     — markdown string (always present on success)
+        structured   — AgentResponse as dict
+        tools_called — list of tool names called
+        run_trace    — RunTrace as dict (steps, token counts)
+        error        — error message or None
     """
     try:
         client = _get_client()
     except EnvironmentError as exc:
-        return {"response": "", "tools_called": [], "error": str(exc)}
+        return {
+            "response": "", "structured": None,
+            "tools_called": [], "run_trace": None, "error": str(exc),
+        }
 
-    messages: list[dict] = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": query},
-    ]
-    tools_called: list[str] = []
+    trace = RunTrace()
+    logger.info("Research agent — phase-locked query: {!r}", query)
 
-    logger.info("Research agent: {!r}", query)
+    # ── Phase 1: Orientation ───────────────────────────────────────────────
+    # Required: get_database_stats, search_stories
+    phase1_results = run_tool_phase(
+        client=client,
+        trace=trace,
+        system=_PHASE1_SYSTEM,
+        user_content=query,
+        allowed_tool_names={"get_database_stats", "search_stories"},
+        required_tool_names={"get_database_stats", "search_stories"},
+        required_fallback_args={"search_stories": {"query": query}},
+        tool_schemas=TOOL_SCHEMAS,
+        tool_registry=_TOOL_FUNCTIONS,
+        max_iters=3,
+    )
 
-    for iteration in range(10):  # safety cap on loop depth
-        response = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=messages,
-            tools=TOOL_SCHEMAS,
-            tool_choice="auto",
-            temperature=LLM_TEMPERATURE,
+    candidates: list[dict] = phase1_results.get("search_stories") or []
+    top_cluster_ids = [c["cluster_id"] for c in candidates[:4] if isinstance(c, dict)]
+
+    # ── Phase 2: Evidence (Python, no LLM) ────────────────────────────────
+    # Fetch pre-computed cluster_analysis for each matched cluster.
+    # Falls back to raw lean breakdown for clusters not yet analyzed.
+    logger.debug("Fetching cluster contexts for {} cluster(s).", len(top_cluster_ids))
+    cluster_contexts = _fetch_cluster_contexts(top_cluster_ids)
+    for ctx in cluster_contexts:
+        trace.add_step(
+            "get_cluster_analysis",
+            {"cluster_id": ctx["cluster_id"]},
+            ctx.get("analysis") or {},
         )
 
-        choice = response.choices[0]
-        logger.debug("Iteration {}: finish_reason={}", iteration + 1, choice.finish_reason)
+    # ── Phase 3: Synthesis ─────────────────────────────────────────────────
+    # Single structured call — no tools. Returns validated AgentResponse.
+    cluster_evidence = _format_cluster_contexts(cluster_contexts)
+    phase3_messages = [
+        {"role": "system", "content": _PHASE3_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"Question: {query}\n\n"
+                f"Matched story clusters:\n{cluster_evidence}"
+            ),
+        },
+    ]
 
-        if choice.finish_reason == "stop":
-            text = choice.message.content or ""
-            logger.info(
-                "Agent finished after {} iteration(s). Tools: {}",
-                iteration + 1,
-                tools_called,
-            )
-            return {"response": text, "tools_called": tools_called, "error": None}
+    agent_response: AgentResponse | None = None
+    try:
+        parsed = client.beta.chat.completions.parse(
+            model=LLM_MODEL,
+            messages=phase3_messages,
+            response_format=AgentResponse,
+            temperature=LLM_TEMPERATURE,
+        )
+        agent_response = parsed.choices[0].message.parsed
+        usage = parsed.usage
+        if agent_response is None:
+            # OpenRouter didn't honour the JSON schema mode; fall back to manual parse
+            raw = parsed.choices[0].message.content or ""
+            agent_response = AgentResponse.model_validate_json(raw)
+        trace.add_step(
+            "__synthesis__", {}, agent_response.model_dump(),
+            prompt_tokens=getattr(usage, "prompt_tokens", None),
+            completion_tokens=getattr(usage, "completion_tokens", None),
+        )
+    except (ValidationError, ValueError) as exc:
+        logger.error("Phase 3 structured synthesis failed: {}", exc)
+        return {
+            "response": "",
+            "structured": None,
+            "tools_called": [s.tool_name for s in trace.steps],
+            "run_trace": trace.model_dump(mode="json"),
+            "error": f"Synthesis validation error: {exc}",
+        }
+    except Exception as exc:
+        logger.error("Phase 3 API call failed: {}", exc)
+        return {
+            "response": "",
+            "structured": None,
+            "tools_called": [s.tool_name for s in trace.steps],
+            "run_trace": trace.model_dump(mode="json"),
+            "error": str(exc),
+        }
 
-        if choice.finish_reason != "tool_calls":
-            break
+    logger.info(
+        "Research agent done. {} steps, {} prompt + {} completion tokens.",
+        len(trace.steps),
+        trace.total_prompt_tokens,
+        trace.total_completion_tokens,
+    )
 
-        # Append the assistant turn (with its tool_calls) and execute each one
-        messages.append(choice.message)
-
-        for tool_call in choice.message.tool_calls:
-            name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments)
-            tools_called.append(name)
-            logger.info("  → {}({})", name, args)
-            result = _execute_tool(name, args)
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": json.dumps(result, default=str),
-            })
+    matched_clusters = [
+        {
+            "cluster_id": ctx["cluster_id"],
+            "headline": ctx["headline"],
+            "lean_coverage": ctx["lean_coverage"],
+            "has_analysis": ctx["has_analysis"],
+            "similarity": next(
+                (c.get("similarity") for c in candidates if c.get("cluster_id") == ctx["cluster_id"]),
+                None,
+            ),
+        }
+        for ctx in cluster_contexts
+    ]
 
     return {
-        "response": "",
-        "tools_called": tools_called,
-        "error": "Agent loop ended without producing a final response.",
+        "response": _to_markdown(agent_response),
+        "structured": agent_response.model_dump(),
+        "matched_clusters": matched_clusters,
+        "tools_called": [s.tool_name for s in trace.steps if not s.tool_name.startswith("__")],
+        "run_trace": trace.model_dump(mode="json"),
+        "error": None,
     }

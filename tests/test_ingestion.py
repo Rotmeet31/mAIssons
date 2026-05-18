@@ -93,8 +93,9 @@ class TestExtractText:
     def test_falls_back_to_feed_summary_on_failure(self):
         from ingestion import _extract_text
         with patch("trafilatura.fetch_url", return_value=None):
-            result = _extract_text("https://example.com", "fallback summary")
-        assert result == "fallback summary"
+            text, used_fallback = _extract_text("https://example.com", "fallback summary")
+        assert text == "fallback summary"
+        assert used_fallback is True
 
     def test_uses_trafilatura_when_successful(self):
         from ingestion import _extract_text
@@ -102,5 +103,6 @@ class TestExtractText:
             patch("trafilatura.fetch_url", return_value=b"<html>content</html>"),
             patch("trafilatura.extract", return_value="Extracted full article text " * 10),
         ):
-            result = _extract_text("https://example.com", "fallback")
-        assert "Extracted" in result
+            text, used_fallback = _extract_text("https://example.com", "fallback")
+        assert "Extracted" in text
+        assert used_fallback is False

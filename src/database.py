@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS clusters (
     representative_headline TEXT NOT NULL,
     lean_coverage         TEXT NOT NULL DEFAULT '{"left":0,"center":0,"right":0}',
     ready_for_analysis    INTEGER NOT NULL DEFAULT 0,
+    centroid              TEXT,
     created_at            TEXT    NOT NULL
 );
 
@@ -83,9 +84,11 @@ CREATE INDEX IF NOT EXISTS idx_analysis_article_id ON analysis(article_id);
 CREATE TABLE IF NOT EXISTS cluster_analysis (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     cluster_id      INTEGER NOT NULL UNIQUE REFERENCES clusters(id) ON DELETE CASCADE,
-    consensus       TEXT    NOT NULL DEFAULT '[]',
-    disagreements   TEXT    NOT NULL DEFAULT '[]',
-    gaps            TEXT    NOT NULL DEFAULT '',
+    summary         TEXT    NOT NULL DEFAULT '',
+    shared_ground   TEXT    NOT NULL DEFAULT '[]',
+    left_not_right  TEXT    NOT NULL DEFAULT '[]',
+    right_not_left  TEXT    NOT NULL DEFAULT '[]',
+    center_angle    TEXT    NOT NULL DEFAULT '',
     analyzed_at     TEXT    NOT NULL
 );
 
@@ -117,11 +120,51 @@ CREATE INDEX IF NOT EXISTS idx_lean_audit_source ON lean_audit(source_name);
 """
 
 
+_NEW_CLUSTER_ANALYSIS_DDL = """
+CREATE TABLE cluster_analysis (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id      INTEGER NOT NULL UNIQUE REFERENCES clusters(id) ON DELETE CASCADE,
+    summary         TEXT    NOT NULL DEFAULT '',
+    shared_ground   TEXT    NOT NULL DEFAULT '[]',
+    left_not_right  TEXT    NOT NULL DEFAULT '[]',
+    right_not_left  TEXT    NOT NULL DEFAULT '[]',
+    center_angle    TEXT    NOT NULL DEFAULT '',
+    analyzed_at     TEXT    NOT NULL
+)
+"""
+
+
 def init_db(db_path: Path = DB_PATH) -> None:
     """Create database file and tables if they don't already exist."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with get_db(db_path) as conn:
         conn.executescript(SCHEMA_SQL)
+        existing_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(cluster_analysis)").fetchall()
+        }
+        # Add centroid column to clusters if missing (existing DBs)
+        cluster_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(clusters)").fetchall()
+        }
+        if "centroid" not in cluster_cols:
+            conn.execute("ALTER TABLE clusters ADD COLUMN centroid TEXT")
+            logger.info("Migrated clusters table: added centroid column.")
+
+        # Migrate from old consensus/disagreements/gaps/lean_summaries schema
+        if "consensus" in existing_cols:
+            conn.execute("DROP TABLE IF EXISTS cluster_analysis")
+            conn.execute(_NEW_CLUSTER_ANALYSIS_DDL)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cluster_analysis_cluster_id "
+                "ON cluster_analysis(cluster_id)"
+            )
+            logger.info(
+                "Migrated cluster_analysis to differential schema "
+                "(summary / shared_ground / left_not_right / right_not_left / center_angle). "
+                "Existing analyses cleared — re-run analysis to regenerate."
+            )
     logger.info("Database initialised at {}", db_path)
 
 
@@ -252,6 +295,23 @@ def update_cluster_ready(
     )
 
 
+def update_cluster_centroid(
+    cluster_id: int, centroid_json: str, conn: sqlite3.Connection
+) -> None:
+    conn.execute(
+        "UPDATE clusters SET centroid = ? WHERE id = ?",
+        (centroid_json, cluster_id),
+    )
+
+
+def get_ready_cluster_centroids(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return id, headline, lean_coverage, centroid for all ready clusters."""
+    return conn.execute(
+        "SELECT id, representative_headline, lean_coverage, centroid "
+        "FROM clusters WHERE ready_for_analysis = 1"
+    ).fetchall()
+
+
 def search_clusters(query: str, conn: sqlite3.Connection) -> list[sqlite3.Row]:
     pattern = f"%{query}%"
     return conn.execute(
@@ -343,19 +403,30 @@ def get_unanalyzed_ready_clusters(conn: sqlite3.Connection) -> list[sqlite3.Row]
 def insert_cluster_analysis(
     *,
     cluster_id: int,
-    consensus: list,
-    disagreements: list,
-    gaps: str,
+    summary: str,
+    shared_ground: list,
+    left_not_right: list,
+    right_not_left: list,
+    center_angle: str,
     conn: sqlite3.Connection,
 ) -> int:
     now = datetime.utcnow().isoformat()
     cur = conn.execute(
         """
         INSERT INTO cluster_analysis
-            (cluster_id, consensus, disagreements, gaps, analyzed_at)
-        VALUES (?, ?, ?, ?, ?)
+            (cluster_id, summary, shared_ground, left_not_right, right_not_left,
+             center_angle, analyzed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (cluster_id, json.dumps(consensus), json.dumps(disagreements), gaps, now),
+        (
+            cluster_id,
+            summary,
+            json.dumps(shared_ground),
+            json.dumps(left_not_right),
+            json.dumps(right_not_left),
+            center_angle,
+            now,
+        ),
     )
     return cur.lastrowid  # type: ignore[return-value]
 
@@ -368,10 +439,14 @@ def get_cluster_analysis(
     ).fetchone()
     if not row:
         return None
-    result = dict(row)
-    result["consensus"] = json.loads(result["consensus"])
-    result["disagreements"] = json.loads(result["disagreements"])
-    return result
+    return {
+        "summary": row["summary"],
+        "shared_ground": json.loads(row["shared_ground"] or "[]"),
+        "left_not_right": json.loads(row["left_not_right"] or "[]"),
+        "right_not_left": json.loads(row["right_not_left"] or "[]"),
+        "center_angle": row["center_angle"] or "",
+        "analyzed_at": row["analyzed_at"],
+    }
 
 
 # ── Entity helpers ─────────────────────────────────────────────────────────
@@ -448,6 +523,15 @@ def get_entities_for_cluster(
         LIMIT  15
         """,
         (cluster_id,),
+    ).fetchall()
+
+
+def get_entities_for_article(
+    article_id: int, conn: sqlite3.Connection
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT normalized, label FROM article_entities WHERE article_id = ?",
+        (article_id,),
     ).fetchall()
 
 

@@ -1,1 +1,21 @@
 .env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Databases (runtime artefacts, not source)
+data/*.db
+
+# Local Claude settings
+.claude/settings.local.json
+
+# macOS
+.DS_Store
